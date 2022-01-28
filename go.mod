@@ -6,6 +6,7 @@ require (
 	github.com/gin-gonic/gin v1.7.7
 	github.com/hashicorp/raft v1.3.3
 	github.com/hashicorp/raft-boltdb v0.0.0-20211202195631-7d34b9fb3f42
+	github.com/impact-eintr/bolt v0.0.1
 )
 
 require (
@@ -27,6 +28,6 @@ require (
 	github.com/modern-go/reflect2 v1.0.1 // indirect
 	github.com/ugorji/go/codec v1.1.7 // indirect
 	golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9 // indirect
-	golang.org/x/sys v0.0.0-20200122134326-e047566fdf82 // indirect
+	golang.org/x/sys v0.0.0-20220114195835-da31bd327af9 // indirect
 	gopkg.in/yaml.v2 v2.2.8 // indirect
 )

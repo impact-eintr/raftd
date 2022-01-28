@@ -14,6 +14,11 @@ import (
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
+	"github.com/impact-eintr/bolt"
+)
+
+const (
+	DefaultBucketName = "impact-eintr"
 )
 
 var (
@@ -55,7 +60,8 @@ type Store struct {
 
 	// 保护m的锁
 	mu sync.RWMutex
-	m  map[string][]byte // 键值对 TODO 后续可更换为 boltdb/leveldb
+	m  map[string][]byte // 键值对缓存 用内存实现
+	db *bolt.DB          // 键值对 用 impact-eintr/bolt 实现
 
 	raft *raft.Raft // 一致性机制
 
@@ -104,6 +110,41 @@ func (s *Store) LeaderAPIAddr() string {
 }
 
 func (s *Store) Open(enableSingle bool, localID string) error {
+	// 配置数据存储
+	db, err := bolt.Open(filepath.Join(s.RaftDir, "data.db"), 0600, nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// 新建一个桶
+	err = db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte(DefaultBucketName))
+		if err != nil {
+			log.Fatalf("CreateBucketIfNotExists err:%s", err.Error())
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	s.db = db
+
+	// 建立数据缓存
+	err = db.View(func(tx *bolt.Tx) error {
+		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
+			return b.ForEach(func(k, v []byte) error {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				s.m[string(k)] = v
+				return nil
+			})
+		})
+	})
+	if err != nil {
+		panic(err)
+	}
+
 	// 配置Raft
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(localID)
@@ -240,7 +281,14 @@ func (s *Store) Get(key string, lvl ConsistencyLevel) ([]byte, error) {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.m[key], nil
+
+	val := make([]byte, 0)
+	s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(DefaultBucketName))
+		val = bucket.Get([]byte(key))
+		return nil
+	})
+	return val, nil
 }
 
 func (s *Store) Set(key string, value []byte) error {
@@ -356,6 +404,15 @@ func (f *fsm) Apply(l *raft.Log) interface{} {
 func (f *fsm) applySet(key string, value []byte) interface{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(DefaultBucketName))
+		if err := bucket.Put([]byte(key), value); err != nil {
+			log.Fatalln(err)
+			return err
+		}
+		return nil
+	})
+	// 更新缓存
 	f.m[key] = value
 	return nil
 }
@@ -363,6 +420,15 @@ func (f *fsm) applySet(key string, value []byte) interface{} {
 func (f *fsm) applyDelete(key string) interface{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(DefaultBucketName))
+		if err := bucket.Delete([]byte(key)); err != nil {
+			log.Fatalln(err)
+			return err
+		}
+		return nil
+	})
+	// 更新缓存
 	delete(f.m, key)
 	return nil
 }
@@ -378,6 +444,7 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	for k, v := range f.m {
 		o[k] = v
 	}
+
 	return &fsmSnapshot{store: o}, nil
 }
 
@@ -387,7 +454,45 @@ func (f *fsm) Restore(rc io.ReadCloser) error {
 	if err := json.NewDecoder(rc).Decode(&o); err != nil {
 		return err
 	}
+
+	// 清空原来的 DB
+	f.db.Close()
+	dbFile, _ := os.OpenFile(filepath.Join(f.RaftDir, "data.db"), os.O_TRUNC, 0600)
+	dbFile.Close()
+
+	// 新建一个空的 DB
+	db, err := bolt.Open(filepath.Join(f.RaftDir, "data.db"), 0600, nil)
+	if err != nil {
+		panic(err)
+	}
+	f.db = db
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists([]byte(DefaultBucketName))
+		if err != nil {
+			log.Fatalf("CreateBucketIfNotExists err:%s", err.Error())
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	// 用快照中的数据更新状态
+	for k, v := range o {
+		err = db.Batch(func(tx *bolt.Tx) error {
+			bucket := tx.Bucket([]byte(DefaultBucketName))
+			return bucket.Put([]byte(k), v)
+		})
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	// 更新缓存
 	f.m = o
+
 	return nil
 }
 
@@ -402,6 +507,7 @@ func (f *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
 		if err != nil {
 			return err
 		}
+
 		// Write data to sink
 		if _, err := sink.Write(b); err != nil {
 			return err
