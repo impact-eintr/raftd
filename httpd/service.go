@@ -87,9 +87,7 @@ func (s *Service) newRouter() (r *gin.Engine) {
 		keyGroup.DELETE(":key", s.DelKeyHandler())
 	}
 
-	r.POST("/join", func(c *gin.Context) {
-		log.Println("????")
-	}, s.JoinHandler())
+	r.POST("/join", s.JoinHandler())
 
 	return r
 }
