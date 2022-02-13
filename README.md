@@ -18,10 +18,6 @@ curl 127.0.0.1:8001/key/test --output 1.png
 ```
 
 
-## TODO
-- 保留 Store.m 作为 Stroe.db 的数据缓存 其实主要是用来支持 raft 集群的
-- 进行快照同步的时候 直接传输这个 Stroe.m 可以有效降低网络负载(相较直接传输 整个 db文件)
-
 > 步骤：
 
 1. 启动的时候只make() 然后 调用 tx.ForEach() 遍历整个 db 建立缓存
@@ -42,4 +38,8 @@ curl 127.0.0.1:8001/key/test --output 1.png
 
 开放接口 POST lease/:leaseId/:key 将表单中的内容提交 raftd找到对应的桶，然后将key:[ttl(uint64 8个字节)][]byte 存进去 ttl 设置为 leaseId的ttl
 
-TODO keepAlive()
+### TODO
+- revoke
+- timetolive
+
+> 加租约系统 用于服务发现 还有不少bug 最突出的是 由于raft的特性 会进行状态机恢复 之前删除的租约会重新创建 如果某个租约没有人租用 会一直存在下去（可以考虑添加租约失效时间） 还有在租约恢复到最新状态之前有新 的操作是可以的 也就是逻辑上已经被删除的租约又被创建出来的并且可以访问 这些问题我认为暂时无法解决 后续学一把raft实现看看 或者问问老师什么的
