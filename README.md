@@ -35,3 +35,11 @@ curl 127.0.0.1:8001/key/test --output 1.png
 3. range snapshot.m 然后执行一个 Batch Update 将数据同步到 fsm.db 和 fsm.m 中
 4. TODO 失败的情况
 
+## 租约系统
+系统开启时创建lease bucket
+开放接口 POST createlease/ 先申请 使用雪花算法生成一个leaseId 每个leaseId 作为一个lease bucket的 subbucket
+成功申请后 每个key 的形式为 leaseId:ttl 每 ttl 秒遍历一次当前bucket的所有键值 将value减一 已经是0的不变 表示过去了一秒 同时统计所有value不为0的值 当这个统计值为0的时候 删除这个桶
+
+开放接口 POST lease/:leaseId/:key 将表单中的内容提交 raftd找到对应的桶，然后将key:[ttl(uint64 8个字节)][]byte 存进去 ttl 设置为 leaseId的ttl
+
+TODO keepAlive()
