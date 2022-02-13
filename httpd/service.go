@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -19,6 +20,10 @@ type Store interface {
 	Get(key string, lvl store.ConsistencyLevel) ([]byte, error)
 	Set(key string, value []byte) error
 	Delete(key string) error
+	LeaseGrant(ttl int) (uint64, error)
+	LeaseKeepAlive(leaseId, key string, value []byte) error
+	LeaseRevoke() error
+	LeaseTimeToAlive() error
 	Join(nodeID string, httpAddress string, addr string) error
 	LeaderAPIAddr() string
 	SetMeta(key, value string) error
@@ -47,6 +52,7 @@ func New(addr string, store Store) *Service {
 		store: store,
 	}
 }
+
 func (s *Service) Start() error {
 	server := http.Server{
 		Handler: s.newRouter(),
@@ -82,9 +88,17 @@ func (s *Service) newRouter() (r *gin.Engine) {
 
 	keyGroup := r.Group("/key")
 	{
-		keyGroup.GET(":key", s.GetKeyHandler())
-		keyGroup.PUT(":key", s.SetKeyHandler())
-		keyGroup.DELETE(":key", s.DelKeyHandler())
+		keyGroup.GET("/:key", s.GetKeyHandler())
+		keyGroup.PUT("/:key", s.SetKeyHandler())
+		keyGroup.DELETE("/:key", s.DelKeyHandler())
+	}
+
+	leaseGroup := r.Group("/lease")
+	{
+		leaseGroup.POST("/grant", s.LeaseGrantHandler())
+		leaseGroup.POST("/keepalive/:id", s.LeaseKeepAliveHandler())
+		leaseGroup.POST("/revoke/:id")
+		leaseGroup.POST("/timetolive/:id")
 	}
 
 	r.POST("/join", s.JoinHandler())
@@ -107,6 +121,8 @@ func level(req *http.Request) (store.ConsistencyLevel, error) {
 		return store.Default, nil
 	}
 }
+
+/* Key-Value存储 */
 
 // 默认返回 Default 一致性级别的Key
 func (s *Service) GetKeyHandler() gin.HandlerFunc {
@@ -242,4 +258,84 @@ func (s *Service) JoinHandler() gin.HandlerFunc {
 			return
 		}
 	}
+}
+
+/* 租约机制 TODO 暂时是独立的*/
+
+// LeaseGrant 创建一个租约
+func (s *Service) LeaseGrantHandler() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		q := ctx.Request.URL.Query()
+		ttl := strings.TrimSpace(q.Get("ttl"))
+		if ttl == "" {
+			ctx.JSON(http.StatusBadRequest, nil)
+			return
+		}
+		ttlnum, err := strconv.Atoi(ttl)
+		if err != nil {
+			ctx.JSON(http.StatusBadRequest, nil)
+			return
+		}
+
+		v, err := s.store.LeaseGrant(ttlnum)
+		if err != nil {
+			if err == store.ErrNotLeader {
+				leader := s.store.LeaderAPIAddr()
+				if leader == "" {
+					ctx.JSON(http.StatusServiceUnavailable, err)
+					return
+				}
+				redirect := s.FormRedirect(ctx.Request, leader)
+				ctx.Redirect(http.StatusTemporaryRedirect, redirect)
+				return
+			}
+			ctx.JSON(http.StatusInternalServerError, err)
+			return
+		}
+		ctx.JSON(http.StatusOK, v)
+	}
+}
+
+// LeaseKeepAlive 用于维持租约
+func (s *Service) LeaseKeepAliveHandler() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		leaseId := ctx.Param("id")
+		if leaseId == "" {
+			ctx.JSON(http.StatusBadRequest, nil)
+			return
+		}
+
+		err := s.store.LeaseKeepAlive(leaseId, "default", []byte("test"))
+		if err != nil {
+			if err == store.ErrNotLeader {
+				leader := s.store.LeaderAPIAddr()
+				if leader == "" {
+					ctx.JSON(http.StatusServiceUnavailable, err)
+					return
+				}
+				redirect := s.FormRedirect(ctx.Request, leader)
+				ctx.Redirect(http.StatusTemporaryRedirect, redirect)
+				return
+			}
+			ctx.JSON(http.StatusInternalServerError, err)
+			return
+		}
+		ctx.JSON(http.StatusOK, nil)
+	}
+}
+
+// LeaseRevoke 撤销一个租约
+func (s *Service) LeaseRevokeHandler() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		leaseId := ctx.Param("id")
+		if leaseId == "" {
+			ctx.JSON(http.StatusBadRequest, nil)
+			return
+		}
+	}
+}
+
+// LeaseTimeToAlive 获取租约信息
+func (s *Service) LeaseTimeToAliveHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {}
 }

@@ -26,17 +26,21 @@ var httpAddr string
 var raftAddr string
 var joinAddr string
 var nodeID string
+var bindID int64
 
 func init() {
 	flag.StringVar(&httpAddr, "haddr", DefaultHTTPAddr, "Set the HTTP bind address")
 	flag.StringVar(&raftAddr, "raddr", DefaultRaftAddr, "Set Raft bind address")
 	flag.StringVar(&joinAddr, "join", "", "Set join address, if any")
+	flag.Int64Var(&bindID, "bind", 128, "The number bind to Node ID, shoule be a int like 0~1023")
 	flag.StringVar(&nodeID, "id", "", "Node ID")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <raft-data-path> \n", os.Args[0])
 		flag.PrintDefaults()
 	}
 }
+
+// TODO 一个租约系统 为 esq 提供服务发现
 
 func main() {
 	// 解析命令行参数
@@ -54,7 +58,7 @@ func main() {
 	}
 	os.MkdirAll(raftDir, 0700)
 
-	s := store.New()
+	s := store.New(bindID)
 	s.RaftDir = raftDir
 	s.RaftBind = raftAddr
 	if err := s.Open(joinAddr == "", nodeID); err != nil {
@@ -86,12 +90,12 @@ func main() {
 		log.Fatalf("failed to start HTTP service: %s", err.Error())
 	}
 
-	log.Println("raftdb started successfully")
+	log.Println("raftd started successfully")
 
 	terminate := make(chan os.Signal, 1)
 	signal.Notify(terminate, os.Interrupt)
 	<-terminate
-	log.Println("raftdb exiting")
+	log.Println("raftd exiting")
 
 }
 

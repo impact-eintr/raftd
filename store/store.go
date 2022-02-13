@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,12 +10,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
 	"github.com/impact-eintr/bolt"
+	"github.com/impact-eintr/raftd/utils"
 )
 
 const (
@@ -41,9 +44,11 @@ const (
 )
 
 type command struct {
-	Op    string `json:"op,omitempty"`
-	Key   string `json:"key,omitempty"`
-	Value []byte `json:"value,omitempty"`
+	Op      string `json:"op,omitempty"`
+	Key     string `json:"key,omitempty"`
+	Value   []byte `json:"value,omitempty"`
+	LeaseId uint64 `json:"leaseId,omitempty"`
+	TTL     int    `json:"ttl,omitempty"`
 }
 
 type ConsistencyLevel int
@@ -53,6 +58,18 @@ const (
 	Stale
 	Consistent
 )
+
+type WaitGroupWrapper struct {
+	sync.WaitGroup
+}
+
+func (w *WaitGroupWrapper) Wrap(cb func()) {
+	w.Add(1)
+	go func() {
+		cb()
+		w.Done()
+	}()
+}
 
 type Store struct {
 	RaftDir  string
@@ -65,13 +82,21 @@ type Store struct {
 
 	raft *raft.Raft // 一致性机制
 
+	snowflake *utils.Snowflake
+	wg        WaitGroupWrapper
+
 	logger *log.Logger
 }
 
-func New() *Store {
+func New(bindID int64) *Store {
+	sn, err := utils.NewSnowflake(bindID)
+	if err != nil {
+		panic(err)
+	}
 	return &Store{
-		m:      make(map[string][]byte),
-		logger: log.New(os.Stderr, "[store] ", log.LstdFlags),
+		m:         make(map[string][]byte),
+		snowflake: sn,
+		logger:    log.New(os.Stderr, "[store] ", log.LstdFlags),
 	}
 }
 
@@ -326,6 +351,90 @@ func (s *Store) Delete(key string) error {
 	return f.Error()
 }
 
+type LeaseMeta struct {
+	TTL int `json:"ttl"`
+}
+
+// 创建新的租约
+func (s *Store) LeaseGrant(ttl int) (uint64, error) {
+	if s.raft.State() != raft.Leader {
+		return 0, ErrNotLeader
+	}
+
+	leaseId := s.snowflake.Generate()
+	c := &command{
+		Op:      "grant",
+		LeaseId: leaseId,
+		TTL:     ttl,
+	}
+
+	b, err := json.Marshal(c)
+	if err != nil {
+		return 0, err
+	}
+
+	f := s.raft.Apply(b, raftTimeout)
+	return leaseId, f.Error()
+}
+
+func (s *Store) LeaseRevoke() error {
+	if s.raft.State() != raft.Leader {
+		return ErrNotLeader
+	}
+	c := &command{
+		Op: "revoke",
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+
+	f := s.raft.Apply(b, raftTimeout)
+	return f.Error()
+}
+
+func (s *Store) LeaseKeepAlive(leaseId, key string, value []byte) error {
+	if s.raft.State() != raft.Leader {
+		return ErrNotLeader
+	}
+
+	intNum, err := strconv.Atoi(leaseId)
+	if err != nil {
+		return err
+	}
+	int64Num := uint64(intNum)
+
+	c := &command{
+		Op:      "keepalive",
+		Key:     key,
+		Value:   value,
+		LeaseId: int64Num,
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+
+	f := s.raft.Apply(b, raftTimeout)
+	return f.Error()
+}
+
+func (s *Store) LeaseTimeToAlive() error {
+	if s.raft.State() != raft.Leader {
+		return ErrNotLeader
+	}
+	c := &command{
+		Op: "timetolive",
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+
+	f := s.raft.Apply(b, raftTimeout)
+	return f.Error()
+}
+
 func (s *Store) SetMeta(key, value string) error {
 	return s.Set(key, []byte(value))
 }
@@ -396,6 +505,14 @@ func (f *fsm) Apply(l *raft.Log) interface{} {
 		return f.applySet(c.Key, c.Value)
 	case "delete":
 		return f.applyDelete(c.Key)
+	case "grant":
+		return f.applyLeaseGrant(c.LeaseId, c.TTL)
+	case "keepalive":
+		return f.applyLeaseKeepAlive(c.LeaseId, c.Key, c.Value)
+	case "revoke":
+		return f.applyLeaseRevoke()
+	case "timetolive":
+		return f.applyLeaseTimeToLive()
 	default:
 		panic(fmt.Sprintf("invalid command op: %s", c.Op))
 	}
@@ -430,6 +547,132 @@ func (f *fsm) applyDelete(key string) interface{} {
 	})
 	// 更新缓存
 	delete(f.m, key)
+	return nil
+}
+
+func (f *fsm) applyLeaseGrant(leaseId uint64, ttl int) interface{} {
+	key := fmt.Sprintf("%d", leaseId)
+
+	// 创建子桶
+	if err := f.db.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(key))
+		if err != nil {
+			return err
+		}
+
+		b, err := json.Marshal(LeaseMeta{TTL: ttl})
+		if err != nil {
+			return err
+		}
+		// 保存元数据
+		return bucket.Put([]byte("meta"), b)
+	}); err != nil {
+		log.Fatalln(err)
+		return err
+	}
+
+	f.wg.Wrap(func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+
+		var start bool
+		for {
+			var count int
+			select {
+			case <-ticker.C:
+				// 每秒遍历当前桶 所有值TTL--
+				f.db.Update(func(tx *bolt.Tx) error {
+					bucket := tx.Bucket([]byte(key))
+
+					// 判断是否有租客
+					if bucket.Stats().KeyN == 1 {
+						start = false
+					} else if bucket.Stats().KeyN > 1 {
+						start = true
+					}
+
+					cur := bucket.Cursor()
+					for k, v := cur.First(); k != nil; k, v = cur.Next() {
+						// 跳过元数据
+						if string(k) == "meta" {
+							return nil
+						}
+						// key:value => key:[ttl(int32 4bytes)][raw value]
+						ttl := binary.BigEndian.Uint32(v[:4])
+						if ttl > 0 {
+							count = count + 1
+							ttl = ttl - 1
+							// 注意由于bolt的实现机制 遍历中的value原值只可以读 不可以修改 需要先复制再Put
+							b := make([]byte, len(v))
+							copy(b, v)
+							binary.BigEndian.PutUint32(b[:4], uint32(ttl))
+							bucket.Put([]byte(k), b)
+						} else if ttl == 0 {
+							// 删除这个键值对
+							cur.Delete()
+						}
+					}
+					return nil
+				})
+				// 租约已经生效 并且 没有存活的键值 退出该租约 并删除对应的桶
+				if count == 0 && start {
+					log.Printf("%d 租约已经失效", leaseId)
+					f.db.Update(func(tx *bolt.Tx) error {
+						return tx.DeleteBucket([]byte(key))
+					})
+					return
+				}
+				// case exitCh:
+			}
+		}
+	})
+	return leaseId
+}
+
+func (f *fsm) applyLeaseRevoke() interface{} {
+	return nil
+}
+
+func (f *fsm) applyLeaseKeepAlive(leaseId uint64, key string, value []byte) interface{} {
+	var ttl int
+	Id := fmt.Sprintf("%d", leaseId)
+	err := f.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(Id))
+		if bucket == nil {
+			return fmt.Errorf("Lease[%s] hash been removed", Id)
+		}
+
+		b := bucket.Get([]byte("meta"))
+		meta := new(LeaseMeta)
+		err := json.Unmarshal(b, meta)
+		if err != nil {
+			return err
+		}
+		ttl = meta.TTL
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	err = f.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(Id))
+		if bucket == nil {
+			return fmt.Errorf("Lease[%s] hash been removed", Id)
+		}
+
+		b := append(make([]byte, 4), value...)
+		binary.BigEndian.PutUint32(b[:4], uint32(ttl))
+		return bucket.Put([]byte(key), b)
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (f *fsm) applyLeaseTimeToLive() interface{} {
 	return nil
 }
 
