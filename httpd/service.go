@@ -20,10 +20,11 @@ type Store interface {
 	Get(key string, lvl store.ConsistencyLevel) ([]byte, error)
 	Set(key string, value []byte) error
 	Delete(key string) error
-	LeaseGrant(ttl int) (uint64, error)
+	LeaseGrant(name string, ttl int) (uint64, error)
 	LeaseKeepAlive(leaseId, key string, value []byte) error
 	LeaseRevoke() error
 	LeaseTimeToAlive() error
+	GetLeaseKV(key string) ([]string, error)
 	Join(nodeID string, httpAddress string, addr string) error
 	LeaderAPIAddr() string
 	SetMeta(key, value string) error
@@ -99,6 +100,7 @@ func (s *Service) newRouter() (r *gin.Engine) {
 		leaseGroup.POST("/keepalive/:id", s.LeaseKeepAliveHandler())
 		leaseGroup.POST("/revoke/:id")
 		leaseGroup.POST("/timetolive/:id")
+		leaseGroup.GET("/kv/:name", s.GetKeyByLeaseHandler())
 	}
 
 	r.POST("/join", s.JoinHandler())
@@ -154,6 +156,33 @@ func (s *Service) GetKeyHandler() gin.HandlerFunc {
 			return
 		}
 		io.Copy(ctx.Writer, bytes.NewReader(v))
+	}
+}
+
+func (s *Service) GetKeyByLeaseHandler() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		k := ctx.Param("name")
+		if k == "" {
+			ctx.JSON(http.StatusBadRequest, nil)
+			return
+		}
+
+		v, err := s.store.GetLeaseKV(k)
+		if err != nil {
+			if err == store.ErrNotLeader {
+				leader := s.store.LeaderAPIAddr()
+				if leader == "" {
+					ctx.JSON(http.StatusServiceUnavailable, err)
+					return
+				}
+				redirect := s.FormRedirect(ctx.Request, leader)
+				ctx.Redirect(http.StatusTemporaryRedirect, redirect)
+				return
+			}
+			ctx.JSON(http.StatusInternalServerError, err)
+			return
+		}
+		ctx.JSON(http.StatusOK, v)
 	}
 }
 
@@ -260,7 +289,7 @@ func (s *Service) JoinHandler() gin.HandlerFunc {
 	}
 }
 
-/* 租约机制 TODO 暂时是独立的*/
+/* 租约机制 NOTICE 是独立的*/
 
 // LeaseGrant 创建一个租约
 func (s *Service) LeaseGrantHandler() gin.HandlerFunc {
@@ -277,7 +306,13 @@ func (s *Service) LeaseGrantHandler() gin.HandlerFunc {
 			return
 		}
 
-		v, err := s.store.LeaseGrant(ttlnum)
+		name := strings.TrimSpace(q.Get("name"))
+		if name == "" {
+			ctx.JSON(http.StatusBadRequest, nil)
+			return
+		}
+
+		v, err := s.store.LeaseGrant(name, ttlnum) // TODO 这里还可以承载更多的数据
 		if err != nil {
 			if err == store.ErrNotLeader {
 				leader := s.store.LeaderAPIAddr()
