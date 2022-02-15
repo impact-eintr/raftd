@@ -2,6 +2,7 @@ package httpd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,7 +25,7 @@ type Store interface {
 	LeaseKeepAlive(leaseId, key string, value []byte) error
 	LeaseRevoke() error
 	LeaseTimeToAlive() error
-	GetLeaseKV(key string) ([]string, error)
+	GetLeaseKV(prefix, key string) ([]string, error)
 	Join(nodeID string, httpAddress string, addr string) error
 	LeaderAPIAddr() string
 	SetMeta(key, value string) error
@@ -98,9 +99,9 @@ func (s *Service) newRouter() (r *gin.Engine) {
 	{
 		leaseGroup.POST("/grant", s.LeaseGrantHandler())
 		leaseGroup.POST("/keepalive/:id", s.LeaseKeepAliveHandler())
-		leaseGroup.POST("/revoke/:id")
-		leaseGroup.POST("/timetolive/:id")
-		leaseGroup.GET("/kv/:name", s.GetKeyByLeaseHandler())
+		leaseGroup.POST("/revoke/:id", s.LeaseRevokeHandler())
+		leaseGroup.POST("/timetolive/:id", s.LeaseTimeToAliveHandler())
+		leaseGroup.POST("/kv/:key", s.GetKeyByLeaseHandler())
 	}
 
 	r.POST("/join", s.JoinHandler())
@@ -156,33 +157,6 @@ func (s *Service) GetKeyHandler() gin.HandlerFunc {
 			return
 		}
 		io.Copy(ctx.Writer, bytes.NewReader(v))
-	}
-}
-
-func (s *Service) GetKeyByLeaseHandler() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		k := ctx.Param("name")
-		if k == "" {
-			ctx.JSON(http.StatusBadRequest, nil)
-			return
-		}
-
-		v, err := s.store.GetLeaseKV(k)
-		if err != nil {
-			if err == store.ErrNotLeader {
-				leader := s.store.LeaderAPIAddr()
-				if leader == "" {
-					ctx.JSON(http.StatusServiceUnavailable, err)
-					return
-				}
-				redirect := s.FormRedirect(ctx.Request, leader)
-				ctx.Redirect(http.StatusTemporaryRedirect, redirect)
-				return
-			}
-			ctx.JSON(http.StatusInternalServerError, err)
-			return
-		}
-		ctx.JSON(http.StatusOK, v)
 	}
 }
 
@@ -291,7 +265,7 @@ func (s *Service) JoinHandler() gin.HandlerFunc {
 
 /* 租约机制 NOTICE 是独立的*/
 
-// LeaseGrant 创建一个租约
+// LeaseGrant 创建一个租约 现在只支持前缀匹配索引
 func (s *Service) LeaseGrantHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		q := ctx.Request.URL.Query()
@@ -317,14 +291,14 @@ func (s *Service) LeaseGrantHandler() gin.HandlerFunc {
 			if err == store.ErrNotLeader {
 				leader := s.store.LeaderAPIAddr()
 				if leader == "" {
-					ctx.JSON(http.StatusServiceUnavailable, err)
+					ctx.JSON(http.StatusServiceUnavailable, err.Error())
 					return
 				}
 				redirect := s.FormRedirect(ctx.Request, leader)
 				ctx.Redirect(http.StatusTemporaryRedirect, redirect)
 				return
 			}
-			ctx.JSON(http.StatusInternalServerError, err)
+			ctx.JSON(http.StatusInternalServerError, err.Error())
 			return
 		}
 		ctx.JSON(http.StatusOK, v)
@@ -340,19 +314,34 @@ func (s *Service) LeaseKeepAliveHandler() gin.HandlerFunc {
 			return
 		}
 
-		err := s.store.LeaseKeepAlive(leaseId, "default", []byte("test"))
+		// TODO 这里还应该可以使用 LeaseName 索引(咕咕咕
+
+		// TODO 这里的数据来自客户端的请求
+		// -XPOST -d 'key=/esq/node-1' -d 'data={"body":"this is a job","topic":"ketang","delay":0,"route_key":"homework"}'
+		key := ctx.Request.FormValue("key")
+		data := ctx.Request.FormValue("data")
+		if len(key) == 0 || len(data) == 0 {
+			ctx.JSON(http.StatusBadRequest, nil)
+			return
+		}
+		//log.Println("维持租约的数据", key, data)
+
+		err := s.store.LeaseKeepAlive(leaseId, key, []byte(data))
 		if err != nil {
 			if err == store.ErrNotLeader {
 				leader := s.store.LeaderAPIAddr()
 				if leader == "" {
-					ctx.JSON(http.StatusServiceUnavailable, err)
+					ctx.JSON(http.StatusServiceUnavailable, err.Error())
 					return
 				}
 				redirect := s.FormRedirect(ctx.Request, leader)
 				ctx.Redirect(http.StatusTemporaryRedirect, redirect)
 				return
+			} else if err == store.ErrLeaseNotFound {
+				ctx.JSON(http.StatusNotFound, err.Error())
+				return
 			}
-			ctx.JSON(http.StatusInternalServerError, err)
+			ctx.JSON(http.StatusInternalServerError, err.Error())
 			return
 		}
 		ctx.JSON(http.StatusOK, nil)
@@ -373,4 +362,46 @@ func (s *Service) LeaseRevokeHandler() gin.HandlerFunc {
 // LeaseTimeToAlive 获取租约信息
 func (s *Service) LeaseTimeToAliveHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {}
+}
+
+// 通过前缀和键名 索引租约 现在只支持前缀匹配索引
+func (s *Service) GetKeyByLeaseHandler() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		key := ctx.Param("key")
+		if key == "" {
+			ctx.JSON(http.StatusBadRequest, nil)
+			return
+		}
+
+		// -XPOST -d 'prefix=/esq/node'
+		prefix := ctx.Request.FormValue("prefix")
+		if len(prefix) == 0 {
+			ctx.JSON(http.StatusBadRequest, nil)
+			return
+		}
+		//log.Println("通过前缀匹配 获取租约中的KV", prefix, key)
+
+		v, err := s.store.GetLeaseKV(prefix, key)
+		if err != nil {
+			if err == store.ErrNotLeader {
+				leader := s.store.LeaderAPIAddr()
+				if leader == "" {
+					ctx.JSON(http.StatusServiceUnavailable, err)
+					return
+				}
+				redirect := s.FormRedirect(ctx.Request, leader)
+				ctx.Redirect(http.StatusTemporaryRedirect, redirect)
+				return
+			}
+			ctx.JSON(http.StatusInternalServerError, err)
+			return
+		}
+		res := []map[string]interface{}{}
+		for k := range v {
+			m := make(map[string]interface{})
+			json.Unmarshal([]byte(v[k]), &m)
+			res = append(res, m)
+		}
+		ctx.JSON(http.StatusOK, res)
+	}
 }

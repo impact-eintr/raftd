@@ -34,6 +34,8 @@ var (
 	// ErrOpenTimeout is returned when the Store does not apply its initial
 	// logs within the specified time.
 	ErrOpenTimeout = errors.New("timeout waiting for initial logs application")
+
+	ErrLeaseNotFound = errors.New("can not find this Lease")
 )
 
 const (
@@ -395,7 +397,6 @@ func (s *Store) LeaseGrant(name string, ttl int) (uint64, error) {
 
 	s.wg.Wrap(func() {
 		ticker := time.NewTicker(time.Second)
-		defer log.Println("退出LoopCheck")
 		defer ticker.Stop()
 
 		var start bool
@@ -420,7 +421,7 @@ func (s *Store) LeaseGrant(name string, ttl int) (uint64, error) {
 						for k, v := cur.First(); k != nil; k, v = cur.Next() {
 							// 跳过元数据
 							if string(k) == "meta" {
-								return nil
+								continue
 							}
 
 							// 修改存活时间
@@ -440,20 +441,11 @@ func (s *Store) LeaseGrant(name string, ttl int) (uint64, error) {
 							if err != nil {
 								return err
 							}
-
 							s.raft.Apply(b, raftTimeout)
 						}
 					}
-					return nil
-				})
-				// 查看Lease中存活的值
-				s.db.View(func(tx *bolt.Tx) error {
-					bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(fmt.Sprintf("%d", leaseId)))
-					if bucket == nil {
-						log.Println("没有找到对应的Lease", leaseId)
-						return fmt.Errorf("Lease[%d] hash been removed", leaseId)
-					}
 
+					// 查看Lease中存活的值
 					b := bucket.Get([]byte("meta"))
 					meta := new(LeaseMeta)
 					err := json.Unmarshal(b, meta)
@@ -497,6 +489,17 @@ func (s *Store) LeaseKeepAlive(leaseId, key string, value []byte) error {
 		return err
 	}
 	int64Num := uint64(intNum)
+
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(leaseId))
+		if bucket == nil {
+			log.Println("没有找到对应的Lease", leaseId)
+			return ErrLeaseNotFound
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
 
 	c := &command{
 		Op:      "keepalive",
@@ -545,7 +548,7 @@ func (s *Store) LeaseTimeToAlive() error {
 	return f.Error()
 }
 
-func (s *Store) GetLeaseKV(key string) ([]string, error) {
+func (s *Store) GetLeaseKV(prefix, key string) ([]string, error) {
 	res := []string{}
 	s.db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(DefaultLeaseBucketName))
@@ -555,10 +558,12 @@ func (s *Store) GetLeaseKV(key string) ([]string, error) {
 		return bucket.ForEach(func(k, v []byte) error {
 			b := bucket.Bucket(k)
 			metabytes := b.Get([]byte("meta"))
-			log.Println(string(metabytes))
+			//log.Println("当前桶的元数据", string(metabytes))
 			meta := &LeaseMeta{}
 			json.Unmarshal(metabytes, meta)
-			if strings.HasPrefix(meta.Name, key) {
+
+			//log.Println("对比：", meta.Name, prefix)
+			if strings.HasPrefix(meta.Name, prefix) {
 				b.ForEach(func(k, v []byte) error {
 					if string(k) == "meta" {
 						return nil
@@ -715,47 +720,37 @@ func (f *fsm) applyLeaseGrant(name string, leaseId uint64, ttl int) interface{} 
 		log.Println(err)
 		return err
 	}
-
+	log.Printf("发放租约 %s [%d]", name, leaseId)
 	return nil
 }
 
 // value是带有ttl头部的值
 func (f *fsm) applyLeaseLoopCheck(leaseId uint64, key string, value []byte) interface{} {
-	var ttl, status, count int
-	var name string
-	err := f.db.View(func(tx *bolt.Tx) error {
+	// Lease仍然有效 改变对应键值对的状态
+	return f.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket([]byte(DefaultLeaseBucketName)) == nil {
+			panic(fmt.Errorf("我的桶呢？？？"))
+		}
 		bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(fmt.Sprintf("%d", leaseId)))
 		if bucket == nil {
 			log.Println("没有找到对应的Lease", leaseId)
 			return fmt.Errorf("Lease[%d] hash been removed", leaseId)
 		}
 
-		b := bucket.Get([]byte("meta"))
+		metabyte := bucket.Get([]byte("meta"))
 		meta := new(LeaseMeta)
-		err := json.Unmarshal(b, meta)
+		err := json.Unmarshal(metabyte, meta)
 		if err != nil {
 			return err
 		}
-		name = meta.Name
-		ttl = meta.TTL
-		status = meta.Status
-		count = meta.Count
-		return nil
-	})
-	if err != nil {
-		return err
-	}
+		name := meta.Name
+		ttl := meta.TTL
+		status := meta.Status
+		count := meta.Count
 
-	if status == DEAD {
-		log.Println("一个已经被撤销的Lease")
-		return nil
-	}
-
-	// Lease仍然有效 改变对应键值对的状态
-	return f.db.Update(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(fmt.Sprintf("%d", leaseId)))
-		if bucket == nil {
-			return fmt.Errorf("Lease[%d] hash been removed", leaseId)
+		if status == DEAD {
+			log.Println("一个已经被撤销的Lease")
+			return nil
 		}
 
 		newttl := binary.BigEndian.Uint32(value[:4])
@@ -777,41 +772,30 @@ func (f *fsm) applyLeaseLoopCheck(leaseId uint64, key string, value []byte) inte
 
 // value是不带有ttl头部的值
 func (f *fsm) applyLeaseKeepAlive(leaseId uint64, key string, value []byte) interface{} {
-	var ttl, status, count int
-	var name string
-	err := f.db.View(func(tx *bolt.Tx) error {
+	// Lease仍然有效 改变对应键值对的状态
+	return f.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket([]byte(DefaultLeaseBucketName)) == nil {
+			panic(fmt.Errorf("我的桶呢？？？"))
+		}
 		bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(fmt.Sprintf("%d", leaseId)))
 		if bucket == nil {
-			log.Println("没有找到对应的Lease", leaseId)
 			return fmt.Errorf("Lease[%d] hash been removed", leaseId)
 		}
 
-		b := bucket.Get([]byte("meta"))
+		metabyte := bucket.Get([]byte("meta"))
 		meta := new(LeaseMeta)
-		err := json.Unmarshal(b, meta)
+		err := json.Unmarshal(metabyte, meta)
 		if err != nil {
 			return err
 		}
-		name = meta.Name
-		ttl = meta.TTL
-		status = meta.Status
-		count = meta.Count
-		return nil
-	})
-	if err != nil {
-		return err
-	}
+		name := meta.Name
+		ttl := meta.TTL
+		status := meta.Status
+		count := meta.Count
 
-	if status == DEAD {
-		log.Println("一个已经被撤销的Lease")
-		return nil
-	}
-
-	// Lease仍然有效 改变对应键值对的状态
-	return f.db.Update(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(fmt.Sprintf("%d", leaseId)))
-		if bucket == nil {
-			return fmt.Errorf("Lease[%d] hash been removed", leaseId)
+		if status == DEAD {
+			log.Println("一个已经被撤销的Lease")
+			return nil
 		}
 
 		// 检测这个值是否出现过 TODO 这里有数据竞争
@@ -846,7 +830,11 @@ func (f *fsm) applyLeaseRevoke(leaseId uint64) interface{} {
 		}
 		b, _ := json.Marshal(LeaseMeta{Status: DEAD}) // 更新Lease状态
 		bucket.Put([]byte("meta"), b)
-		return tx.Bucket([]byte(DefaultLeaseBucketName)).DeleteBucket([]byte(fmt.Sprintf("%d", leaseId)))
+		if err := tx.Bucket([]byte(DefaultLeaseBucketName)).DeleteBucket([]byte(fmt.Sprintf("%d", leaseId))); err != nil {
+			return err
+		}
+		log.Println("撤销租约", leaseId)
+		return nil
 	})
 }
 
