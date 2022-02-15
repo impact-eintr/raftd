@@ -491,6 +491,9 @@ func (s *Store) LeaseKeepAlive(leaseId, key string, value []byte) error {
 	int64Num := uint64(intNum)
 
 	if err := s.db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket([]byte(DefaultLeaseBucketName)) == nil {
+			return fmt.Errorf("No any KV in LeaseSystem")
+		}
 		bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(leaseId))
 		if bucket == nil {
 			log.Println("没有找到对应的Lease", leaseId)
