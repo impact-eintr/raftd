@@ -31,15 +31,27 @@ curl 127.0.0.1:8001/key/test --output 1.png
 3. range snapshot.m 然后执行一个 Batch Update 将数据同步到 fsm.db 和 fsm.m 中
 4. TODO 失败的情况
 
-## 租约系统
-系统开启时创建lease bucket
-开放接口 POST createlease/ 先申请 使用雪花算法生成一个leaseId 每个leaseId 作为一个lease bucket的 subbucket
-成功申请后 每个key 的形式为 leaseId:ttl 每 ttl 秒遍历一次当前bucket的所有键值 将value减一 已经是0的不变 表示过去了一秒 同时统计所有value不为0的值 当这个统计值为0的时候 删除这个桶
+## 租约系统(可以用于服务发现)
 
-开放接口 POST lease/:leaseId/:key 将表单中的内容提交 raftd找到对应的桶，然后将key:[ttl(uint64 8个字节)][]byte 存进去 ttl 设置为 leaseId的ttl
+### Usage
+
+获取租约并续租
+``` sh
+# 服务1
+ID=$(curl -s -XPOST 127.0.0.1:8001/lease/grant\?ttl=10\&name=/esq/node-1);while true;do curl -vv -XPOST 127.0.0.1:8001/lease/keepalive/$ID -d 'key=nodeinfo' -d 'data={"http_addr":"127.0.0.1:9001","tcp_addr":"127.0.0.1:9002","node_id":1,"weight":1}';sleep 3;done
+
+
+# 服务2
+ID=$(curl -s -XPOST 127.0.0.1:8001/lease/grant\?ttl=10\&name=/esq/node-2);while true;do curl -vv -XPOST 127.0.0.1:8001/lease/keepalive/$ID -d 'key=nodeinfo1' -d 'data={"http_addr":"127.0.0.1:9003","tcp_addr":"127.0.0.1:9004","node_id":2,"weight":2}';sleep 3;done
+```
+
+获取键值对
+
+``` sh
+curl -s -XPOST 127.0.0.1:8001/lease/kv/nodeinfo -d 'prefix=/esq/node'
+```
 
 ### TODO
-- revoke
-- timetolive
+- Revoke API
+- TimeToLive API
 
-> 加租约系统 用于服务发现 还有不少bug 最突出的是 由于raft的特性 会进行状态机恢复 之前删除的租约会重新创建 如果某个租约没有人租用 会一直存在下去（可以考虑添加租约失效时间） 还有在租约恢复到最新状态之前有新 的操作是可以的 也就是逻辑上已经被删除的租约又被创建出来的并且可以访问 这些问题我认为暂时无法解决 后续学一把raft实现看看 或者问问老师什么的
