@@ -1,5 +1,5 @@
 # raftd
-raftd 基于 raft 和 内存(后续支持 bolt) 的分布式KV数据库 基于gin框架提供http服务
+raftd 基于`raft`算法，支持数据持久化(bolt)的分布式KV数据库，可以用于简单的服务发现，基于gin框架提供http服务
 
 ## Usage
 
