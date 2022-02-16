@@ -23,7 +23,7 @@ type Store interface {
 	Delete(key string) error
 	LeaseGrant(name string, ttl int) (uint64, error)
 	LeaseKeepAlive(leaseId, key string, value []byte) error
-	LeaseRevoke() error
+	LeaseRevoke(leaseId string) error
 	LeaseTimeToAlive() error
 	GetLeaseKV(prefix, key string) ([]string, error)
 	Join(nodeID string, httpAddress string, addr string) error
@@ -317,7 +317,7 @@ func (s *Service) LeaseKeepAliveHandler() gin.HandlerFunc {
 		// TODO 这里还应该可以使用 LeaseName 索引(咕咕咕
 
 		// TODO 这里的数据来自客户端的请求
-		// -XPOST -d 'key=/esq/node-1' -d 'data={"body":"this is a job","topic":"ketang","delay":0,"route_key":"homework"}'
+		// -XPOST -d 'key=/esq/node-1' -d 'data={"body":"this is a job","delay":0,"route_key":"homework"}'
 		key := ctx.Request.FormValue("key")
 		data := ctx.Request.FormValue("data")
 		if len(key) == 0 || len(data) == 0 {
@@ -356,6 +356,25 @@ func (s *Service) LeaseRevokeHandler() gin.HandlerFunc {
 			ctx.JSON(http.StatusBadRequest, nil)
 			return
 		}
+		err := s.store.LeaseRevoke(leaseId)
+		if err != nil {
+			if err == store.ErrNotLeader {
+				leader := s.store.LeaderAPIAddr()
+				if leader == "" {
+					ctx.JSON(http.StatusServiceUnavailable, err.Error())
+					return
+				}
+				redirect := s.FormRedirect(ctx.Request, leader)
+				ctx.Redirect(http.StatusTemporaryRedirect, redirect)
+				return
+			} else if err == store.ErrLeaseNotFound {
+				ctx.JSON(http.StatusNotFound, err.Error())
+				return
+			}
+			ctx.JSON(http.StatusInternalServerError, err.Error())
+			return
+		}
+		ctx.JSON(http.StatusOK, nil)
 	}
 }
 

@@ -36,6 +36,7 @@ var (
 	ErrOpenTimeout = errors.New("timeout waiting for initial logs application")
 
 	ErrLeaseNotFound = errors.New("can not find this Lease")
+	ErrLeaseExpire   = errors.New("this Lease has been expired")
 )
 
 const (
@@ -153,6 +154,11 @@ func (s *Store) Open(enableSingle bool, localID string) error {
 	// 新建一个桶
 	err = db.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucketIfNotExists([]byte(DefaultKVBucketName))
+		if err != nil {
+			log.Fatalf("CreateBucketIfNotExists err:%s", err.Error())
+			return err
+		}
+		_, err = tx.CreateBucketIfNotExists([]byte(DefaultLeaseBucketName))
 		if err != nil {
 			log.Fatalf("CreateBucketIfNotExists err:%s", err.Error())
 			return err
@@ -405,8 +411,11 @@ func (s *Store) LeaseGrant(name string, ttl int) (uint64, error) {
 			var count int
 			select {
 			case <-ticker.C:
-				s.db.Update(func(tx *bolt.Tx) error {
+				err := s.db.Update(func(tx *bolt.Tx) error {
 					bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(fmt.Sprintf("%d", leaseId)))
+					if bucket == nil {
+						return ErrLeaseExpire
+					}
 
 					// 判断是否有租客
 					if bucket.Stats().KeyN == 1 {
@@ -455,6 +464,13 @@ func (s *Store) LeaseGrant(name string, ttl int) (uint64, error) {
 					count = meta.Count
 					return nil
 				})
+				switch err {
+				case ErrLeaseExpire:
+					return
+				case nil:
+				default:
+					log.Fatalln(err)
+				}
 
 				// 租约已经生效 并且 没有存活的键值 撤销该Lease
 				if count == 0 && start {
@@ -491,9 +507,9 @@ func (s *Store) LeaseKeepAlive(leaseId, key string, value []byte) error {
 	int64Num := uint64(intNum)
 
 	if err := s.db.View(func(tx *bolt.Tx) error {
-		if tx.Bucket([]byte(DefaultLeaseBucketName)) == nil {
-			return fmt.Errorf("No any KV in LeaseSystem")
-		}
+		//if tx.Bucket([]byte(DefaultLeaseBucketName)) == nil {
+		//	return fmt.Errorf("No any KV in LeaseSystem")
+		//}
 		bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(leaseId))
 		if bucket == nil {
 			log.Println("没有找到对应的Lease", leaseId)
@@ -519,12 +535,31 @@ func (s *Store) LeaseKeepAlive(leaseId, key string, value []byte) error {
 	return f.Error()
 }
 
-func (s *Store) LeaseRevoke() error {
+func (s *Store) LeaseRevoke(leaseId string) error {
 	if s.raft.State() != raft.Leader {
 		return ErrNotLeader
 	}
+
+	intNum, err := strconv.Atoi(leaseId)
+	if err != nil {
+		return err
+	}
+	int64Num := uint64(intNum)
+
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(leaseId))
+		if bucket == nil {
+			log.Println("没有找到对应的Lease", leaseId)
+			return ErrLeaseNotFound
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	c := &command{
-		Op: "revoke",
+		Op:      "revoke",
+		LeaseId: int64Num,
 	}
 	b, err := json.Marshal(c)
 	if err != nil {
@@ -757,7 +792,7 @@ func (f *fsm) applyLeaseLoopCheck(leaseId uint64, key string, value []byte) inte
 		}
 
 		newttl := binary.BigEndian.Uint32(value[:4])
-		log.Printf("[%d]状态检测: TTL:%d Now:%d AliveKeys:%d", leaseId, ttl, newttl, count)
+		//log.Printf("[%d]状态检测: TTL:%d Now:%d AliveKeys:%d", leaseId, ttl, newttl, count)
 		if newttl > 0 {
 			b := make([]byte, len(value))
 			copy(b, value)
