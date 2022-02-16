@@ -4,6 +4,10 @@ raftd 基于`raft`算法，支持数据持久化(bolt)的分布式KV数据库，
 ## Usage
 
 ``` sh
+cd cmd/raftd
+
+go build
+
 ./raftd -id node01 -haddr 127.0.0.1:8001 -raddr 127.0.0.1:8101 ~/.raftd01
 
 ./raftd -id node02 -haddr 127.0.0.1:8002 -raddr 127.0.0.1:8102 -join 127.0.0.1:8001 ~/.raftd02
