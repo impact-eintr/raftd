@@ -507,9 +507,6 @@ func (s *Store) LeaseKeepAlive(leaseId, key string, value []byte) error {
 	int64Num := uint64(intNum)
 
 	if err := s.db.View(func(tx *bolt.Tx) error {
-		//if tx.Bucket([]byte(DefaultLeaseBucketName)) == nil {
-		//	return fmt.Errorf("No any KV in LeaseSystem")
-		//}
 		bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(leaseId))
 		if bucket == nil {
 			log.Println("没有找到对应的Lease", leaseId)
@@ -603,7 +600,7 @@ func (s *Store) GetLeaseKV(prefix, key string) ([]string, error) {
 			//log.Println("对比：", meta.Name, prefix)
 			if strings.HasPrefix(meta.Name, prefix) {
 				b.ForEach(func(k, v []byte) error {
-					if string(k) == "meta" {
+					if string(k) == "meta" || string(k) != key {
 						return nil
 					}
 					res = append(res, string(v[4:]))
