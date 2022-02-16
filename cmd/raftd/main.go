@@ -85,6 +85,8 @@ func main() {
 		log.Fatalf("failed to SetMeta at %s: %s", nodeID, err.Error())
 	}
 
+	s.RecoverStatus()
+
 	h := httpd.New(httpAddr, s)
 	if err := h.Start(); err != nil {
 		log.Fatalf("failed to start HTTP service: %s", err.Error())

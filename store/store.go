@@ -170,21 +170,6 @@ func (s *Store) Open(enableSingle bool, localID string) error {
 	}
 	s.db = db
 
-	// 建立数据缓存
-	err = db.View(func(tx *bolt.Tx) error {
-		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
-			return b.ForEach(func(k, v []byte) error {
-				s.mu.Lock()
-				defer s.mu.Unlock()
-				s.m[string(k)] = v
-				return nil
-			})
-		})
-	})
-	if err != nil {
-		panic(err)
-	}
-
 	// 配置Raft
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(localID)
@@ -240,6 +225,7 @@ func (s *Store) Open(enableSingle bool, localID string) error {
 	} else {
 		s.logger.Printf("no bootstrap needed")
 	}
+
 	return nil
 }
 
@@ -294,6 +280,56 @@ func (s *Store) WaitForApplied(timeout time.Duration) error {
 		return ErrOpenTimeout
 	}
 	return nil
+}
+
+// RecoverStatus 节点状态机恢复后 根据状态机最新状态恢复服务现场
+func (s *Store) RecoverStatus() {
+	err := s.db.View(func(tx *bolt.Tx) error {
+		log.Println("开始恢复数据缓存")
+		bucket := tx.Bucket([]byte(DefaultKVBucketName))
+		err := bucket.ForEach(func(k, v []byte) error {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.m[string(k)] = v
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+
+		log.Println("开始恢复租约服务")
+		bucket = tx.Bucket([]byte(DefaultLeaseBucketName))
+		return bucket.ForEach(func(k, v []byte) error {
+			leasebucket := bucket.Bucket(k)
+			metabyte := leasebucket.Get([]byte("meta"))
+			meta := new(LeaseMeta)
+			err := json.Unmarshal(metabyte, meta)
+			if err != nil {
+				return err
+			}
+			intNum, err := strconv.Atoi(string(k))
+			if err != nil {
+				return err
+			}
+			leaseId := uint64(intNum)
+
+			// 检测租约状态
+			if meta.Status == ALIVE {
+				s.wg.Wrap(func() {
+					s.loopCheck(leaseId)
+				})
+			} else if meta.Status == CREATE {
+				// TODO 处于CREATE的租约
+				//      可以将这些申请了却没有使用的租约放到租约池中 之后发放新租约的时候先从租约池中取用
+				// PutLeasePool(leaseId)
+			}
+
+			return nil
+		})
+	})
+	if err != nil {
+		panic(err)
+	}
 }
 
 func (s *Store) consistentRead() error {
@@ -366,6 +402,20 @@ func (s *Store) Delete(key string) error {
 	return f.Error()
 }
 
+func (s *Store) SetMeta(key, value string) error {
+	return s.Set(key, []byte(value))
+}
+
+func (s *Store) GetMeta(key string) (m string, err error) {
+	b, err := s.Get(key, Stale)
+	m = string(b)
+	return
+}
+
+func (s *Store) DeleteMeta(key string) error {
+	return s.Delete(key)
+}
+
 const (
 	CREATE = iota
 	ALIVE
@@ -402,94 +452,7 @@ func (s *Store) LeaseGrant(name string, ttl int) (uint64, error) {
 	f := s.raft.Apply(b, raftTimeout)
 
 	s.wg.Wrap(func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-
-		var start bool
-		// 操作状态机 alive dead
-		for {
-			var count int
-			select {
-			case <-ticker.C:
-				err := s.db.Update(func(tx *bolt.Tx) error {
-					bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(fmt.Sprintf("%d", leaseId)))
-					if bucket == nil {
-						return ErrLeaseExpire
-					}
-
-					// 判断是否有租客
-					if bucket.Stats().KeyN == 1 {
-						start = false
-					} else if bucket.Stats().KeyN > 1 {
-						start = true
-					}
-
-					// 向状态机写入：alive 修改Lease中键值对的存活时间 TTL--
-					if start {
-						cur := bucket.Cursor()
-						for k, v := cur.First(); k != nil; k, v = cur.Next() {
-							// 跳过元数据
-							if string(k) == "meta" {
-								continue
-							}
-
-							// 修改存活时间
-							ttl := binary.BigEndian.Uint32(v[:4])
-							ttl = ttl - 1
-							// 注意由于bolt的实现机制 遍历中的value原值只可以读 不可以修改 需要先复制再Put
-							b := make([]byte, len(v))
-							copy(b, v)
-							binary.BigEndian.PutUint32(b[:4], uint32(ttl))
-							c := &command{
-								Op:      "loopcheck",
-								Key:     string(k),
-								Value:   b,
-								LeaseId: leaseId,
-							}
-							b, err := json.Marshal(c)
-							if err != nil {
-								return err
-							}
-							s.raft.Apply(b, raftTimeout)
-						}
-					}
-
-					// 查看Lease中存活的值
-					b := bucket.Get([]byte("meta"))
-					meta := new(LeaseMeta)
-					err := json.Unmarshal(b, meta)
-					if err != nil {
-						return err
-					}
-					count = meta.Count
-					return nil
-				})
-				switch err {
-				case ErrLeaseExpire:
-					return
-				case nil:
-				default:
-					log.Fatalln(err)
-				}
-
-				// 租约已经生效 并且 没有存活的键值 撤销该Lease
-				if count == 0 && start {
-					log.Printf("%d 租约已经失效 count=%d", leaseId, count)
-					c := &command{
-						Op:      "revoke",
-						LeaseId: leaseId,
-					}
-					b, err := json.Marshal(c)
-					if err != nil {
-						continue
-					}
-					// 向状态机写入：dead 撤销该Lease
-					s.raft.Apply(b, raftTimeout)
-					return
-				}
-				// case exitCh:
-			}
-		}
+		s.loopCheck(leaseId)
 	})
 
 	return leaseId, f.Error()
@@ -613,18 +576,95 @@ func (s *Store) GetLeaseKV(prefix, key string) ([]string, error) {
 	return res, nil
 }
 
-func (s *Store) SetMeta(key, value string) error {
-	return s.Set(key, []byte(value))
-}
+func (s *Store) loopCheck(leaseId uint64) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 
-func (s *Store) GetMeta(key string) (m string, err error) {
-	b, err := s.Get(key, Stale)
-	m = string(b)
-	return
-}
+	var start bool
+	// 操作状态机 alive dead
+	for {
+		var count int
+		select {
+		case <-ticker.C:
+			err := s.db.Update(func(tx *bolt.Tx) error {
+				bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(fmt.Sprintf("%d", leaseId)))
+				if bucket == nil {
+					return ErrLeaseExpire
+				}
 
-func (s *Store) DeleteMeta(key string) error {
-	return s.Delete(key)
+				// 判断是否有租客
+				if bucket.Stats().KeyN == 1 {
+					start = false
+				} else if bucket.Stats().KeyN > 1 {
+					start = true
+				}
+
+				// 向状态机写入：alive 修改Lease中键值对的存活时间 TTL--
+				if start {
+					cur := bucket.Cursor()
+					for k, v := cur.First(); k != nil; k, v = cur.Next() {
+						// 跳过元数据
+						if string(k) == "meta" {
+							continue
+						}
+
+						// 修改存活时间
+						ttl := binary.BigEndian.Uint32(v[:4])
+						ttl = ttl - 1
+						// 注意由于bolt的实现机制 遍历中的value原值只可以读 不可以修改 需要先复制再Put
+						b := make([]byte, len(v))
+						copy(b, v)
+						binary.BigEndian.PutUint32(b[:4], uint32(ttl))
+						c := &command{
+							Op:      "loopcheck",
+							Key:     string(k),
+							Value:   b,
+							LeaseId: leaseId,
+						}
+						b, err := json.Marshal(c)
+						if err != nil {
+							return err
+						}
+
+						s.raft.Apply(b, raftTimeout)
+					}
+				}
+
+				// 查看Lease中存活的值
+				b := bucket.Get([]byte("meta"))
+				meta := new(LeaseMeta)
+				err := json.Unmarshal(b, meta)
+				if err != nil {
+					return err
+				}
+				count = meta.Count
+				return nil
+			})
+			switch err {
+			case ErrLeaseExpire:
+				return
+			case nil:
+			default:
+				log.Fatalln(err)
+			}
+
+			// 租约已经生效 并且 没有存活的键值 撤销该Lease
+			if count == 0 && start {
+				log.Printf("%d 租约已经失效 count=%d", leaseId, count)
+				c := &command{
+					Op:      "revoke",
+					LeaseId: leaseId,
+				}
+				b, err := json.Marshal(c)
+				if err != nil {
+					continue
+				}
+				// 向状态机写入：dead 撤销该Lease
+				s.raft.Apply(b, raftTimeout)
+				return
+			}
+		}
+	}
 }
 
 // Join joins a node, identified by nodeID and located at addr, to this store.
@@ -763,9 +803,6 @@ func (f *fsm) applyLeaseGrant(name string, leaseId uint64, ttl int) interface{} 
 func (f *fsm) applyLeaseLoopCheck(leaseId uint64, key string, value []byte) interface{} {
 	// Lease仍然有效 改变对应键值对的状态
 	return f.db.Update(func(tx *bolt.Tx) error {
-		if tx.Bucket([]byte(DefaultLeaseBucketName)) == nil {
-			panic(fmt.Errorf("我的桶呢？？？"))
-		}
 		bucket := tx.Bucket([]byte(DefaultLeaseBucketName)).Bucket([]byte(fmt.Sprintf("%d", leaseId)))
 		if bucket == nil {
 			log.Println("没有找到对应的Lease", leaseId)
@@ -789,7 +826,7 @@ func (f *fsm) applyLeaseLoopCheck(leaseId uint64, key string, value []byte) inte
 		}
 
 		newttl := binary.BigEndian.Uint32(value[:4])
-		//log.Printf("[%d]状态检测: TTL:%d Now:%d AliveKeys:%d", leaseId, ttl, newttl, count)
+		log.Printf("[%d]状态检测: TTL:%d Now:%d AliveKeys:%d", leaseId, ttl, newttl, count)
 		if newttl > 0 {
 			b := make([]byte, len(value))
 			copy(b, value)
