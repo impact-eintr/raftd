@@ -55,7 +55,15 @@ ID=$(curl -s -XPOST 127.0.0.1:8001/lease/grant\?ttl=10\&name=/esq/node-2);while 
 curl -s -XPOST 127.0.0.1:8001/lease/kv/nodeinfo -d 'prefix=/esq/node'
 ```
 
+### 实现原理
+
+1. 创建一个DefaultLeaseBucketName的Bucket
+2. 用雪花算法生成一个LeaseId，这个Id作为一个子桶，里面存放共享这个租约的键值对，注意有一个Key是不允许覆写的，KeyName为 `meta`，存放当前租约的元数据，包括 LeaseTTL LeaseAliveCount LeaseStatus LeaseName
+3. 启动一个 goroutine 每秒检测当前租约的状态，一旦有客户端租用了当前租约，租约的状态就从 CREATE 转为 ALIVE，并且给租约中的所有键值对的TTL减去一，在操作完所有的键值对后，统计TTL不为0的AliveCount，如果AliveCount==0，撤销当前租约(退出当前goroutine,删除这个LeaseId的子桶)
+4. 续租：客户端在申请完租约后，会从服务端获取租约号，使用租约号可以续租，一旦续租，对应租约中的对应键值对的TTL会重新置为这个租约的TTL(从 `meta` 中获取)
+
+
 ### TODO
-- Revoke API
+- 申请了却从不租用的租约该怎么处理？这些租约的状态为CREATE，如果每次同步状态机时全部重启loopCheck，会消耗一定的资源，如果同步的时候直接删除这些租约属实 鸭子睁眼——大可不必 了，目前有一个可能的解决方案是 PutInPool
 - TimeToLive API
 
