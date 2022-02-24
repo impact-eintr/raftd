@@ -65,5 +65,7 @@ curl -s -XPOST 127.0.0.1:8001/lease/kv/nodeinfo -d 'prefix=/esq/node'
 
 ### TODO
 - 申请了却从不租用的租约该怎么处理？这些租约的状态为CREATE，如果每次同步状态机时全部重启loopCheck，会消耗一定的资源，如果同步的时候直接删除这些租约属实 鸭子睁眼——大可不必 了，目前有一个可能的解决方案是 PutInPool
+
 - TimeToLive API
 
+- 存放租约的树换成LSM-Tree，KV系统属于读多写少，租约系统属于读写都比较多，每秒会有多个协程更新整棵树，可以考虑为租约系统单独做一个存储引擎，准备参考<https://github.com/dgraph-io/badger/tree/v1.0.0>,这个库比较成熟，值得借鉴
