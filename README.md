@@ -69,3 +69,5 @@ curl -s -XPOST 127.0.0.1:8001/lease/kv/nodeinfo -d 'prefix=/esq/node'
 - TimeToLive API
 
 - 存放租约的树换成LSM-Tree，KV系统属于读多写少，租约系统属于读写都比较多，每秒会有多个协程更新整棵树，可以考虑为租约系统单独做一个存储引擎，准备参考<https://github.com/dgraph-io/badger/tree/v1.0.0>,这个库比较成熟，值得借鉴
+
+- 关于 LSM Tree 存放租约 key 应该设计为 LeaseID value 设计为 metaSize(4bytes)valueSize(4bytes)meta(struct_json_bytes)value(map_json_bytes) TODO:考虑使用某个更高性能的json库
