@@ -35,18 +35,20 @@ func appendKV(kvb, k, v []byte, ttl uint32) []byte {
 			binary.BigEndian.PutUint32(buf[8:], uint32(len(kvb)+len(k))) // valueOffset
 			binary.BigEndian.PutUint32(buf[12:], uint32(len(v)))         // valueLen
 			binary.BigEndian.PutUint32(buf[16:], ttl)
-			kvb = append(kvb, k...)
-			kvb = append(kvb, v...)
 
 			// 满了 标注 NextBlockOffset
 			if curOffset == BlockIndexSize-IndexSize {
 				// 往后一个 indexSize 就是 nextblockOffset
-				buf = kvb // kvb 发生了扩容 重新指向一下
-				buf = buf[curOffset+IndexSize:]
-				binary.BigEndian.PutUint32(buf[:], uint32(len(kvb)))
-				newBlockIndex := make([]byte, BlockIndexSize+4)
+				buf = buf[IndexSize:]
+				binary.BigEndian.PutUint32(buf[:], uint32(len(kvb)+len(k)+len(v)))
+				newBlockIndex := make([]byte, 4+BlockIndexSize)
 				binary.BigEndian.PutUint32(newBlockIndex[:], 4) // 读写指针初始化
+				kvb = append(kvb, k...)
+				kvb = append(kvb, v...)
 				kvb = append(kvb, newBlockIndex...)
+			} else {
+				kvb = append(kvb, k...)
+				kvb = append(kvb, v...)
 			}
 
 			break
