@@ -13,6 +13,8 @@ const (
 )
 
 // [co][ko ks vo vs ttl ...][nbo][k v k v ...] [co][ko ks vo vs ttl ...][nbo][k v k v ...]...
+
+// 会返回填充过的 kvb 小心使用
 func appendKV(kvb, k, v []byte, ttl uint32) []byte {
 	if len(k) == 0 || len(v) == 0 {
 		return kvb
@@ -61,6 +63,59 @@ func appendKV(kvb, k, v []byte, ttl uint32) []byte {
 		}
 	}
 	return kvb
+}
+
+// 会返回一个 kvb 的复制切片 使用方法：声明一个 kvb 传入 用另外一个 out_slice 接收返回值
+func safeAppendKV(kvb, k, v []byte, ttl uint32) (out []byte) {
+	if len(k) == 0 || len(v) == 0 {
+		return kvb
+	}
+
+	// 初始化
+	if len(kvb) == 0 {
+		kvb = make([]byte, BlockIndexSize+4)
+		binary.BigEndian.PutUint32(kvb[:], 4) // 读写指针初始化
+	}
+
+	buf := kvb
+	for {
+		curOffset := binary.BigEndian.Uint32(buf[:4])
+		if curOffset < BlockIndexSize {
+			binary.BigEndian.PutUint32(buf[:4], curOffset+IndexSize)     // 标记当前数据指针后移
+			buf = buf[curOffset:]                                        // 定位到当前读写指针处
+			binary.BigEndian.PutUint32(buf[:], uint32(len(kvb)))         // keyOffset
+			binary.BigEndian.PutUint32(buf[4:], uint32(len(k)))          // keyLen
+			binary.BigEndian.PutUint32(buf[8:], uint32(len(kvb)+len(k))) // valueOffset
+			binary.BigEndian.PutUint32(buf[12:], uint32(len(v)))         // valueLen
+			binary.BigEndian.PutUint32(buf[16:], ttl)
+
+			// 满了 标注 NextBlockOffset
+			if curOffset == BlockIndexSize-IndexSize {
+				// 往后一个 indexSize 就是 nextblockOffset
+				buf = buf[IndexSize:]
+				binary.BigEndian.PutUint32(buf[:], uint32(len(kvb)+len(k)+len(v)))
+				newBlockIndex := make([]byte, 4+BlockIndexSize)
+				binary.BigEndian.PutUint32(newBlockIndex[:], 4) // 读写指针初始化
+				kvb = append(kvb, k...)
+				kvb = append(kvb, v...)
+				kvb = append(kvb, newBlockIndex...)
+			} else {
+				kvb = append(kvb, k...)
+				kvb = append(kvb, v...)
+			}
+
+			break
+		} else {
+			// 准备跳到下一个数据块
+			buf = buf[BlockIndexSize:]
+			nextblockOffset := binary.BigEndian.Uint32(buf[:4]) // 读取下一个数据块索引开始的位置
+
+			buf = kvb[nextblockOffset:]
+		}
+	}
+	out = make([]byte, len(kvb))
+	copy(out, kvb)
+	return
 }
 
 // TODO 性能现在太差了 之后需要优化 用一下 XMM ?
@@ -125,7 +180,7 @@ func rangeKV(kvb []byte, cb func([]byte, []byte) error) {
 
 	defer func() {
 		if err := recover(); err != nil {
-			fmt.Println("出错了")
+			fmt.Println("出错了", err)
 		}
 	}()
 
