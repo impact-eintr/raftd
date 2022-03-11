@@ -422,13 +422,6 @@ const (
 	DEAD
 )
 
-type LeaseMeta struct {
-	Name   string `json:"name"`
-	TTL    int    `json:"ttl"`
-	Status int    `json:"status"`
-	Count  int    `json:"count"`
-}
-
 // 创建新的租约
 func (s *Store) LeaseGrant(name string, ttl int) (uint64, error) {
 	if s.raft.State() != raft.Leader {
