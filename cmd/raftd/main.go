@@ -40,8 +40,6 @@ func init() {
 	}
 }
 
-// TODO 一个租约系统 为 esq 提供服务发现
-
 func main() {
 	// 解析命令行参数
 	flag.Parse()
@@ -97,8 +95,8 @@ func main() {
 	terminate := make(chan os.Signal, 1)
 	signal.Notify(terminate, os.Interrupt)
 	<-terminate
+	s.Close()
 	log.Println("raftd exiting")
-
 }
 
 func join(joinAddr, httpAddr, raftAddr, nodeID string) error {
