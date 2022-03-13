@@ -3,7 +3,10 @@ package store
 import (
 	"encoding/binary"
 	"encoding/json"
+	"log"
 )
+
+// Bucket == metaLen + meta + map[key]struct{ttl, value}
 
 type LeaseMeta struct {
 	Name   string `json:"name"`
@@ -22,6 +25,7 @@ func AssertTrue(p bool) {
 func encode(l *LeaseMeta) []byte {
 	b, err := json.Marshal(l)
 	if err != nil {
+		log.Println(err)
 		return nil
 	}
 	return b
@@ -31,6 +35,7 @@ func decode(b []byte) *LeaseMeta {
 	ls := new(LeaseMeta)
 	err := json.Unmarshal(b, ls)
 	if err != nil {
+		log.Println(err)
 		return nil
 	}
 	return ls
@@ -49,5 +54,5 @@ func DecodeMeta(b []byte) (*LeaseMeta, int) {
 	AssertTrue(len(b) >= 4)
 	ml := binary.BigEndian.Uint32(b[:4])
 	AssertTrue(len(b) >= int(4+ml))
-	return decode(b[4:ml]), int(4 + ml)
+	return decode(b[4 : 4+ml]), int(4 + ml)
 }
