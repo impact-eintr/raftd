@@ -323,10 +323,8 @@ func (s *Store) RecoverStatus() {
 				return err
 			}
 			meta, _ := DecodeMeta(v)
-			log.Println(meta)
 			// 检测租约状态
 			if meta.Status == ALIVE {
-				//log.Println("恢复租约", leaseId)
 				s.wg.Wrap(func() {
 					s.loopCheck(leaseId)
 				})
@@ -634,7 +632,6 @@ func (s *Store) loopCheck(leaseId uint64) {
 
 			// 租约已经生效 并且 没有存活的键值 撤销该Lease
 			if count == 0 && start {
-				log.Printf("%d 租约已经失效 count=%d", leaseId, count)
 				c := &command{
 					Op:      "revoke",
 					LeaseId: leaseId,
