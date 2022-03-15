@@ -42,17 +42,17 @@ curl 127.0.0.1:8001/key/test --output 1.png
 获取租约并续租
 ``` sh
 # 服务1
-ID=$(curl -s -XPOST 127.0.0.1:8001/lease/grant\?ttl=10\&name=/esq/node-1);while true;do curl -vv -XPOST 127.0.0.1:8001/lease/keepalive/$ID -d 'key=nodeinfo' -d 'data={"http_addr":"127.0.0.1:9001","tcp_addr":"127.0.0.1:9002","node_id":1,"weight":1}';sleep 3;done
+ID=$(curl -sL -XPOST 127.0.0.1:8001/lease/grant\?ttl=10\&name=/esq/node-1);while true;do curl -sL -XPOST 127.0.0.1:8001/lease/keepalive/$ID -d 'key=nodeinfo' -d 'data={"http_addr":"127.0.0.1:9001","tcp_addr":"127.0.0.1:9002","node_id":1,"weight":1}';sleep 3;done
 
 
 # 服务2
-ID=$(curl -s -XPOST 127.0.0.1:8001/lease/grant\?ttl=10\&name=/esq/node-2);while true;do curl -vv -XPOST 127.0.0.1:8001/lease/keepalive/$ID -d 'key=nodeinfo1' -d 'data={"http_addr":"127.0.0.1:9003","tcp_addr":"127.0.0.1:9004","node_id":2,"weight":2}';sleep 3;done
+ID=$(curl -sL -XPOST 127.0.0.1:8001/lease/grant\?ttl=10\&name=/esq/node-2);while true;do curl -sL -XPOST 127.0.0.1:8001/lease/keepalive/$ID -d 'key=nodeinfo1' -d 'data={"http_addr":"127.0.0.1:9003","tcp_addr":"127.0.0.1:9004","node_id":2,"weight":2}';sleep 3;done
 ```
 
 获取键值对
 
 ``` sh
-curl -s -XPOST 127.0.0.1:8001/lease/kv/nodeinfo -d 'prefix=/esq/node'
+curl -sL -XPOST 127.0.0.1:8001/lease/kv/nodeinfo -d 'prefix=/esq/node'
 ```
 
 ### 实现原理
