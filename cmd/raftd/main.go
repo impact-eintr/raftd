@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"time"
 
 	"github.com/impact-eintr/raftd/httpd"
@@ -59,6 +60,12 @@ func main() {
 	s := store.New(bindID)
 	s.RaftDir = raftDir
 	s.RaftBind = raftAddr
+
+	s.DBDir = path.Join(raftDir, "kv")
+	s.DB2Dir = path.Join(raftDir, "lease")
+	os.MkdirAll(s.DBDir, 0700)
+	os.MkdirAll(s.DB2Dir, 0700)
+
 	if err := s.Open(joinAddr == "", nodeID); err != nil {
 		log.Fatalf("failed to join node at %s:%s", joinAddr, err.Error())
 	}

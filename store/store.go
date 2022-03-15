@@ -88,6 +88,9 @@ type Store struct {
 	db  *bolt.DB          // 键值对 用 impact-eintr/bolt 实现
 	db2 *lsmdb.DB
 
+	DBDir  string
+	DB2Dir string
+
 	raft *raft.Raft // 一致性机制
 
 	// 租约系统相关实现
@@ -147,7 +150,7 @@ func (s *Store) LeaderAPIAddr() string {
 
 func (s *Store) Open(enableSingle bool, localID string) error {
 	// 配置数据存储
-	db, err := bolt.Open(filepath.Join(s.RaftDir, "data.db"), 0600, nil)
+	db, err := bolt.Open(filepath.Join(s.DBDir, "data.db"), 0600, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -171,7 +174,7 @@ func (s *Store) Open(enableSingle bool, localID string) error {
 	}
 	s.db = db
 
-	db2, err := lsmdb.Open(lsmdb.DefaultOptions(s.RaftDir))
+	db2, err := lsmdb.Open(lsmdb.DefaultOptions(s.DB2Dir))
 	if err != nil {
 		panic(err)
 	}
@@ -772,6 +775,7 @@ func (f *fsm) applyLeaseLoopCheck(leaseId uint64) interface{} {
 		if err != nil {
 			return err
 		}
+
 		bucket := NewBucket()
 		bucket.Decode(v)
 		// 循环递减 TTL
@@ -786,8 +790,8 @@ func (f *fsm) applyLeaseLoopCheck(leaseId uint64) interface{} {
 				v := bucket.KV[k]
 				v.T--
 				bucket.KV[k] = v
-				log.Printf("[%d]:%s状态检测: TTL:%d Now:%d AliveKeys:%d",
-					leaseId, k, bucket.Meta.TTL, bucket.KV[k].T, bucket.Meta.Count)
+				//log.Printf("[%d]:%s状态检测: TTL:%d Now:%d AliveKeys:%d",
+				//	leaseId, k, bucket.Meta.TTL, bucket.KV[k].T, bucket.Meta.Count)
 			}
 		}
 
@@ -796,7 +800,7 @@ func (f *fsm) applyLeaseLoopCheck(leaseId uint64) interface{} {
 		if err != nil {
 			return err
 		}
-		return txn.Set([]byte(fmt.Sprintf("%d", leaseId)), v)
+		return txn.Update([]byte(fmt.Sprintf("%d", leaseId)), v)
 	})
 }
 
@@ -836,7 +840,7 @@ func (f *fsm) applyLeaseKeepAlive(leaseId uint64, key string, value []byte) inte
 		if err != nil {
 			return err
 		}
-		return txn.Set([]byte(fmt.Sprintf("%d", leaseId)), v)
+		return txn.Update([]byte(fmt.Sprintf("%d", leaseId)), v)
 	})
 }
 
@@ -867,6 +871,8 @@ func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	for k, v := range f.m {
 		o[k] = v
 	}
+	o["test"] = []byte("fjdksh")
+	log.Println(o)
 
 	return &fsmSnapshot{store: o}, nil
 }
@@ -877,14 +883,15 @@ func (f *fsm) Restore(rc io.ReadCloser) error {
 	if err := json.NewDecoder(rc).Decode(&o); err != nil {
 		return err
 	}
+	log.Println(o)
 
 	// 清空原来的 DB
 	f.db.Close()
-	dbFile, _ := os.OpenFile(filepath.Join(f.RaftDir, "data.db"), os.O_TRUNC, 0600)
+	dbFile, _ := os.OpenFile(filepath.Join(f.DBDir, "data.db"), os.O_TRUNC, 0600)
 	dbFile.Close()
 
 	// 新建一个空的 DB
-	db, err := bolt.Open(filepath.Join(f.RaftDir, "data.db"), 0600, nil)
+	db, err := bolt.Open(filepath.Join(f.DBDir, "data.db"), 0600, nil)
 	if err != nil {
 		panic(err)
 	}

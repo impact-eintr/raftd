@@ -2,17 +2,18 @@ package store
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"log"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // Bucket == metaLen + meta + map[key]struct{ttl, value}
 
 type LeaseMeta struct {
-	Name   string `json:"name"`
-	TTL    int    `json:"ttl"`
-	Status int    `json:"status"`
-	Count  int    `json:"count"`
+	Name   string `msgpack:"name"`
+	TTL    int    `msgpack:"ttl"`
+	Status int    `msgpack:"status"`
+	Count  int    `msgpack:"count"`
 }
 
 func AssertTrue(p bool) {
@@ -23,7 +24,7 @@ func AssertTrue(p bool) {
 }
 
 func encode(l *LeaseMeta) []byte {
-	b, err := json.Marshal(l)
+	b, err := msgpack.Marshal(l)
 	if err != nil {
 		log.Println(err)
 		return nil
@@ -33,7 +34,7 @@ func encode(l *LeaseMeta) []byte {
 
 func decode(b []byte) *LeaseMeta {
 	ls := new(LeaseMeta)
-	err := json.Unmarshal(b, ls)
+	err := msgpack.Unmarshal(b, ls)
 	if err != nil {
 		log.Println(err)
 		return nil

@@ -1,6 +1,8 @@
 package store
 
-import "encoding/json"
+import (
+	"github.com/vmihailenco/msgpack/v5"
+)
 
 // 这是一个性能最差的版本 之后再优化
 
@@ -36,7 +38,7 @@ func (b *Bucket) Encode() (out []byte, err error) {
 	out = out[:0]
 	mb := EncodeMeta(&b.Meta)
 	out = append(out, mb...)
-	kvb, err := json.Marshal(b.KV)
+	kvb, err := msgpack.Marshal(b.KV)
 	if err != nil {
 		return nil, err
 	}
@@ -47,5 +49,5 @@ func (b *Bucket) Encode() (out []byte, err error) {
 func (b *Bucket) Decode(src []byte) error {
 	ml, offset := DecodeMeta(src)
 	b.Meta = *ml
-	return json.Unmarshal(src[offset:], &b.KV)
+	return msgpack.Unmarshal(src[offset:], &b.KV)
 }
